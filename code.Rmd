@@ -653,9 +653,12 @@ print(chi_test_bb$residuals)
 pitch_performance <- df_processed_with_cluster %>%
   filter(pitch_type != "", !is.na(pitch_type)) %>%  
   group_by(batter_type.y, pitch_type) %>%
-  summarise(avg_launch_speed = mean(launch_speed, na.rm = TRUE),
-            avg_launch_angle = mean(launch_angle, na.rm = TRUE),
-            success_rate = mean(events == "single" | events == "double" | events == "home_run"), .groups = "keep")
+  summarise(
+    avg_launch_speed = mean(launch_speed, na.rm = TRUE),
+    avg_launch_angle = mean(launch_angle, na.rm = TRUE),
+    success_rate = mean(events == "single" | events == "double" | events == "home_run", na.rm = TRUE),
+    .groups = "keep"
+  )
 
 ggplot(pitch_performance, aes(x = pitch_type, y = success_rate, fill = batter_type.y)) +
   geom_bar(stat = "identity", position = "dodge") +
@@ -761,7 +764,7 @@ ggplot(grid_data_with_colors, aes(x = x, y = y, fill = zone)) +
     plot.title = element_text(size = 14, hjust = 0.5)
   )
 
-# power
+# Power
 
 ggplot(grid_data_with_colors, aes(x = x, y = y, fill = avg_launch_speed_power)) +
   geom_tile() +
@@ -783,7 +786,7 @@ ggplot(grid_data_with_colors, aes(x = x, y = y, fill = avg_launch_speed_power)) 
     legend.position = "right"
   )
 
-
+# Control
 ggplot(grid_data_with_colors, aes(x = x, y = y, fill = avg_launch_speed_control)) +
   geom_tile() +
   scale_fill_gradient(low = "blue", high = "red", na.value = "white", name = "Avg Launch Speed") +
@@ -804,6 +807,7 @@ ggplot(grid_data_with_colors, aes(x = x, y = y, fill = avg_launch_speed_control)
     legend.position = "right"
   )
 
+# Patient
 ggplot(grid_data_with_colors, aes(x = x, y = y, fill = avg_launch_speed_patient)) +
   geom_tile() +
   scale_fill_gradient(low = "blue", high = "red", na.value = "white", name = "Avg Launch Speed") +
