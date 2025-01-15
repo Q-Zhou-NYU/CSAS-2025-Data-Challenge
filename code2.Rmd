@@ -1,0 +1,826 @@
+---
+title: 'Data challenge'
+subtitle: 'Baseball '
+author: "QIANHE ZHOU, XIYAN ZHOU, YE LIU "
+date: "`r Sys.Date()`"
+format: pdf
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(ggplot2)
+library(tidyverse)
+library(factoextra)
+library(corrplot)
+library(lubridate)
+#setwd('~/Downloads/baseball_challenge')
+```
+
+```{r}
+df <- read_csv("statcast_pitch_swing_data_20240402_20241030_with_arm_angle.csv")
+```
+
+# Relationship between Batting Quality and Plate Discipline
+
+## Initial Data Exploration
+
+```{r}
+# Check missing values
+missing_summary <- sapply(df, function(x) sum(is.na(x)))
+print("Missing Values Summary:")
+print(missing_summary)
+
+# Basic statistics for key variables
+key_vars <- df %>%
+  select(bat_speed, swing_length, plate_x, plate_z, strikes, balls, 
+         launch_angle, launch_speed) %>%
+  summary()
+print("Key Variables Summary:")
+print(key_vars)
+```
+
+## Data Preprocessing
+
+```{r}
+df_processed <- df %>%
+  # Create derived variables
+  mutate(
+    game_date = as.Date(game_date),
+    game_month = format(game_date, "%Y-%m"),
+    game_week = format(game_date, "%Y-%W"),
+    
+    # Create count state
+    count = paste(balls, strikes, sep = "-"),
+    # Define strike zone
+    in_zone = case_when(
+      abs(plate_x) <= 0.85 & plate_z >= 1.5 & plate_z <= 3.5 ~ "In Zone",
+      TRUE ~ "Out of Zone"
+    ),
+    # Calculate batter-specific metrics
+    batter_avg_speed = ave(bat_speed, batter, FUN = function(x) mean(x, na.rm = TRUE)),
+    batter_avg_length = ave(swing_length, batter, FUN = function(x) mean(x, na.rm = TRUE)),
+    
+    # Additional analysis of edge cases
+    edge_pitch = case_when(
+      abs(plate_x) >= 0.7 & abs(plate_x) <= 1.0 ~ "Edge",
+      TRUE ~ "Not Edge"
+    ),
+    # contact result
+    contact_result = case_when(
+      !is.na(launch_speed) ~ "Contact",
+      TRUE ~ "Miss"
+    ),
+    # group pitch speed
+    pitch_speed_group = case_when(
+      release_speed >= 95 ~ "High",
+      release_speed >= 90 ~ "Medium",
+      TRUE ~ "Low"
+    )
+  ) 
+head(df_processed)
+```
+
+```{r}
+# Calculate batter-level statistics
+
+batter_stats <- df_processed %>%
+  group_by(batter) %>%
+  summarise(
+    avg_bat_speed = mean(bat_speed, na.rm = TRUE),
+    avg_swing_length = mean(swing_length, na.rm = TRUE),
+    n_swings = n(),
+    chase_rate = mean(in_zone == "Out of Zone", na.rm = TRUE),
+    two_strike_avg_speed = mean(bat_speed[strikes == 2], na.rm = TRUE),
+    edge_contact_rate = mean(edge_pitch == "Edge" & contact_result == "Contact", na.rm = TRUE),
+    two_strike_chase = mean(strikes == 2 & in_zone == "Out of Zone", na.rm = TRUE),
+    high_velo_performance = mean(bat_speed[pitch_speed_group == "High"], na.rm = TRUE),
+    
+    patience_index = mean(balls/(balls + strikes), na.rm = TRUE),
+    swing_discipline = sd(bat_speed, na.rm = TRUE)/mean(bat_speed, na.rm = TRUE)
+  )
+
+# Calculate count-based statistics
+count_stats <- df_processed %>%
+  group_by(count) %>%
+  summarise(
+    avg_bat_speed = mean(bat_speed, na.rm = TRUE),
+    avg_swing_length = mean(swing_length, na.rm = TRUE),
+    n_swings = n(),
+
+    contact_rate = mean(contact_result == "Contact", na.rm = TRUE),
+    zone_swing_rate = mean(in_zone == "In Zone", na.rm = TRUE),
+    avg_launch_angle = mean(launch_angle, na.rm = TRUE),
+    
+    edge_performance = mean(bat_speed[edge_pitch == "Edge"], na.rm = TRUE)
+  ) %>%
+  arrange(desc(avg_bat_speed)
+          )
+
+```
+
+## PCA
+
+```{r}
+# Prepare data for PCA
+pca_data <- df_processed %>%
+  select(bat_speed, swing_length, launch_angle, launch_speed, 
+         plate_x, plate_z, release_speed, pfx_x, pfx_z) %>%
+  na.omit()
+
+# Scale the data and perform PCA
+pca_data_scaled <- scale(pca_data)
+pca_result <- prcomp(pca_data_scaled)
+
+# Get PCA loadings and scores
+pca_loadings <- pca_result$rotation
+pca_scores <- pca_result$x
+```
+
+## visualization
+
+```{r}
+fviz_pca_biplot(pca_result,
+                      label = "var",
+                      col.var = "#2E9FDF",
+                      col.ind = "#696969",
+                      alpha.ind = 0.3)
+
+ggplot(df_processed, aes(x = bat_speed, y = swing_length)) +
+  geom_point(alpha = 0.1) +
+  geom_smooth(method = "lm") +
+  theme_minimal() +
+  labs(title = "Bat Speed vs Swing Length")
+
+ggplot(df_processed, aes(x = count, y = bat_speed)) +
+  geom_boxplot() +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45)) +
+  labs(title = "Bat Speed by Count")
+
+# Create strike zone heat map with bat speed
+strike_zone_heatmap <- ggplot(df_processed, aes(x = plate_x, y = plate_z, color = bat_speed)) +
+  geom_point(alpha = 0.5) +
+  scale_color_viridis_c(option = "plasma") +
+  geom_vline(xintercept = c(-0.85, 0.85), linetype = "dashed", color = "gray") +
+  geom_hline(yintercept = c(1.5, 3.5), linetype = "dashed", color = "gray") +
+  theme_minimal() +
+  labs(title = "Strike Zone Heat Map: Bat Speed by Location",
+       x = "Horizontal Location",
+       y = "Vertical Location",
+       color = "Bat Speed") +
+  coord_equal()
+
+# Two-Strike Performance Analysis
+two_strike_analysis <- df_processed %>%
+  filter(strikes == 2) %>%
+  group_by(batter) %>%
+  summarise(
+    avg_bat_speed = mean(bat_speed, na.rm = TRUE),
+    avg_swing_length = mean(swing_length, na.rm = TRUE),
+    n_swings = n(),
+    contact_rate = mean(!is.na(launch_speed), na.rm = TRUE),
+    in_zone_rate = mean(in_zone == "In Zone", na.rm = TRUE)
+  ) %>%
+  filter(n_swings >= 10)  # Filter for batters with minimum swings
+
+ggplot(two_strike_analysis, 
+                         aes(x = avg_bat_speed, y = contact_rate)) +
+  geom_point(aes(size = n_swings, color = in_zone_rate), alpha = 0.6) +
+  geom_smooth(method = "lm", se = TRUE, color = "blue") +
+  scale_color_viridis_c() +
+  theme_minimal() +
+  labs(title = "Two-Strike Performance Analysis",
+       x = "Average Bat Speed",
+       y = "Contact Rate",
+       size = "Number of Swings",
+       color = "In Zone Rate")
+
+# Create plate discipline visualization
+plate_discipline <- df_processed %>%
+  group_by(batter) %>%
+  summarise(
+    chase_rate = mean(in_zone == "Out of Zone", na.rm = TRUE),
+    contact_quality = mean(bat_speed, na.rm = TRUE),
+    n_pitches = n(),
+    edge_performance = mean(bat_speed[abs(plate_x) >= 0.7 & 
+                                    abs(plate_x) <= 1.0], na.rm = TRUE)
+  ) %>%
+  filter(n_pitches >= 50)  # Filter for meaningful sample size
+
+ggplot(plate_discipline, 
+                         aes(x = chase_rate, y = contact_quality)) +
+  geom_point(aes(size = n_pitches, color = edge_performance), alpha = 0.6) +
+  scale_color_viridis_c() +
+  geom_smooth(method = "lm", se = TRUE, color = "red") +
+  theme_minimal() +
+  labs(title = "Plate Discipline vs Contact Quality",
+       x = "Chase Rate",
+       y = "Average Bat Speed",
+       size = "Number of Pitches",
+       color = "Edge Performance")
+
+# Patience vs Batting Quality
+ggplot(batter_stats, 
+       aes(x = patience_index, y = avg_bat_speed)) +
+  geom_point(aes(size = n_swings, color = edge_contact_rate), alpha = 0.6) +
+  geom_smooth(method = "lm", se = TRUE) +
+  scale_color_viridis_c() +
+  theme_minimal() +
+  labs(title = "Patience vs Batting Quality",
+       x = "Patience Index",
+       y = "Average Bat Speed",
+       color = "Edge Contact Rate",
+       size = "Number of Swings")
+
+# Count Impact on Batting Performance
+ggplot(count_stats, 
+       aes(x = reorder(count, -avg_bat_speed), y = avg_bat_speed)) +
+  geom_bar(stat = "identity", aes(fill = contact_rate)) +
+  scale_fill_viridis_c() +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(title = "Count Impact on Batting Performance",
+       x = "Count",
+       y = "Average Bat Speed",
+       fill = "Contact Rate")
+
+# Edge Performance by Pitch Speed
+edge_analysis <- df_processed %>%
+  filter(edge_pitch == "Edge") %>%
+  group_by(batter, pitch_speed_group) %>%
+  summarise(
+    avg_bat_speed = mean(bat_speed, na.rm = TRUE),
+    contact_rate = mean(contact_result == "Contact", na.rm = TRUE),
+    n_swings = n(),
+    .groups = "keep"
+  ) %>%
+  filter(n_swings >= 10)
+
+ggplot(edge_analysis,
+       aes(x = pitch_speed_group, y = avg_bat_speed)) +
+  geom_boxplot(aes(fill = pitch_speed_group)) +
+  facet_wrap(~contact_rate >= median(contact_rate), 
+             labeller = labeller(
+               `TRUE` = "High Contact Rate",
+               `FALSE` = "Low Contact Rate"
+             )) +
+  theme_minimal() +
+  labs(title = "Edge Performance by Pitch Speed",
+       x = "Pitch Speed Group",
+       y = "Average Bat Speed")
+
+```
+
+## statistics
+
+```{r}
+# Correlation Analysis
+cor.test(batter_stats$avg_bat_speed, 
+         batter_stats$patience_index)
+
+# Performance Comparison
+t.test(
+  df_processed$bat_speed[df_processed$strikes == 2],
+  df_processed$bat_speed[df_processed$strikes != 2]
+)
+
+```
+
+## clustering
+
+```{r}
+# First create these metrics if they don't exist
+clean_data <- batter_stats %>%
+  select(batter, avg_bat_speed, chase_rate, patience_index, swing_discipline) %>%
+  na.omit()
+
+# Perform clustering with all four variables
+batter_clusters <- clean_data %>%
+  select(-batter) %>%  # Remove batter ID for clustering
+  scale() %>%
+  kmeans(centers = 4)
+
+# Add clusters back to the clean data
+clean_data$batter_type <- factor(batter_clusters$cluster)
+
+# Join back to original data
+batter_stats <- batter_stats %>%
+  left_join(
+    clean_data %>% select(batter, batter_type),
+    by = "batter"
+  )
+
+# Analyze the clusters
+cluster_summary <- clean_data %>%
+  group_by(batter_type) %>%
+  summarise(
+    n = n(),
+    avg_speed = mean(avg_bat_speed),
+    avg_chase = mean(chase_rate),
+    avg_patience = mean(patience_index),
+    avg_discipline = mean(swing_discipline)
+  )
+
+# Visualize the clusters with more dimensions
+# Using pairs plot to show relationships between all variables
+GGally::ggpairs(
+  clean_data %>% select(avg_bat_speed, chase_rate, 
+                       patience_index, swing_discipline, batter_type),
+  aes(color = batter_type)
+)
+
+```
+
+### Initial Classification using Core Variable
+
+```{r}
+library(tidyverse)
+library(factoextra)
+library(gridExtra)
+
+# Prepare core clustering data
+clean_data <- batter_stats %>%
+  select(
+    batter,
+    avg_bat_speed,    
+    avg_swing_length,   
+    swing_discipline  
+  ) %>%
+  na.omit()
+
+# Scale the data for clustering
+clustering_data <- clean_data %>%
+  select(-batter) %>%
+  scale()
+
+# Determine optimal number of clusters (optional validation step)
+p1 <- fviz_nbclust(clustering_data, kmeans, method = "wss") +
+  ggtitle("Elbow Method")
+
+p2 <- fviz_nbclust(clustering_data, kmeans, method = "silhouette") +
+  ggtitle("Silhouette Method")
+
+grid.arrange(p1, p2, ncol = 2)
+
+# Perform clustering
+set.seed(123)
+batter_clusters <- kmeans(clustering_data, centers = 3, nstart = 25)
+
+# Add cluster information to data
+clean_data$batter_type <- factor(batter_clusters$cluster, 
+                                labels = c("Control", "Power", "Patient"))
+```
+
+```{r}
+ggplot(clean_data, aes(x = avg_bat_speed, y = swing_discipline, size = avg_swing_length, color = batter_type)) +
+  geom_point(alpha = 0.6) +
+  scale_color_manual(values = c("#e74c3c", "#2ecc71", "#3498db")) +
+  theme_minimal() +
+  labs(title = "Batter Types Clustering with Swing Length",
+       x = "Average Bat Speed",
+       y = "Swing Discipline")
+
+
+pca_data <- clean_data %>%
+  select(avg_bat_speed, avg_swing_length, swing_discipline) %>%
+  scale() %>%
+  prcomp()
+
+pca_df <- data.frame(
+  PC1 = pca_data$x[,1],
+  PC2 = pca_data$x[,2],
+  batter_type = clean_data$batter_type
+)
+
+ggplot(pca_df, aes(x = PC1, y = PC2, color = batter_type)) +
+  geom_point(alpha = 0.6) +
+  scale_color_manual(values = c("#e74c3c", "#2ecc71", "#3498db")) +
+  theme_minimal() +
+  labs(title = "PCA of Batter Types",
+       x = "First Principal Component",
+       y = "Second Principal Component") +
+  stat_summary(fun = mean, geom = "point", size = 5, shape = 18)
+
+```
+
+### characteristics analyze
+
+```{r}
+# Join cluster information back to full stats
+batter_stats_with_type <- batter_stats %>%
+  left_join(
+    clean_data %>% select(batter, batter_type),
+    by = "batter"
+  )
+
+# Analyze core characteristics
+core_summary <- batter_stats_with_type %>%
+  group_by(batter_type.y) %>%
+  summarise(
+    n_batters = n(),
+    mean_bat_speed = mean(avg_bat_speed, na.rm = TRUE),
+    mean_swing_length = mean(avg_swing_length, na.rm = TRUE),
+    mean_discipline = mean(swing_discipline, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# Analyze secondary characteristics
+secondary_analysis <- batter_stats_with_type %>%
+  group_by(batter_type.y) %>%
+  summarise(
+    # Two-strike performance
+    avg_two_strike_speed = mean(two_strike_avg_speed, na.rm = TRUE),
+    avg_two_strike_chase = mean(two_strike_chase, na.rm = TRUE),
+    
+    # Plate discipline
+    avg_chase_rate = mean(chase_rate, na.rm = TRUE),
+    avg_patience = mean(patience_index, na.rm = TRUE),
+    
+    # Contact quality
+    avg_edge_contact = mean(edge_contact_rate, na.rm = TRUE),
+    avg_high_velo = mean(high_velo_performance, na.rm = TRUE),
+    
+    avg_n_swings = mean(n_swings, na.rm = TRUE),
+    .groups = "drop"
+  )
+```
+
+### visualization
+
+```{r}
+# Core variables relationships
+p3 <- GGally::ggpairs(
+  clean_data,
+  columns = c("avg_bat_speed", "avg_swing_length", "swing_discipline"),
+  aes(color = batter_type.y),
+  upper = list(continuous = "blank")
+) +
+  theme_bw() 
+
+# Function to create boxplots for secondary variables
+create_boxplot <- function(data, y_var, y_label) {
+  ggplot(data, aes(x = batter_type.y, y = !!sym(y_var), fill = batter_type.y)) +
+    geom_boxplot(alpha = 0.7) +
+    theme_bw() +
+    labs(x = "Batter Type", y = y_label) +
+    theme(legend.position = "none")
+}
+
+# Create boxplots for key secondary variables
+p4 <- create_boxplot(batter_stats_with_type, "two_strike_avg_speed", "Two-Strike Bat Speed")
+p5 <- create_boxplot(batter_stats_with_type, "chase_rate", "Chase Rate")
+p6 <- create_boxplot(batter_stats_with_type, "edge_contact_rate", "Edge Contact Rate")
+p7 <- create_boxplot(batter_stats_with_type, "high_velo_performance", "High Velocity Performance")
+
+# Arrange plots
+grid.arrange(p4, p5, p6, p7, ncol = 2)
+```
+
+### Statistical Testing
+
+```{r}
+# Perform ANOVA tests for secondary variables
+secondary_vars <- c("two_strike_avg_speed", "chase_rate", 
+                   "edge_contact_rate", "high_velo_performance")
+
+anova_results <- lapply(secondary_vars, function(var) {
+  formula <- as.formula(paste(var, "~ batter_type.y"))
+  aov_result <- aov(formula, data = batter_stats_with_type)
+  list(
+    variable = var,
+    p_value = summary(aov_result)[[1]][["Pr(>F)"]][1],
+    f_value = summary(aov_result)[[1]][["F value"]][1]
+  )
+})
+
+# Convert ANOVA results to data frame
+anova_summary <- do.call(rbind, lapply(anova_results, as.data.frame))
+
+# Print results
+print("Core Variables Summary:")
+print(core_summary)
+
+clean_data %>%
+  select(batter_type, avg_bat_speed, avg_swing_length, swing_discipline) %>%
+  gather(metric, value, -batter_type) %>%
+  ggplot(aes(x = batter_type, y = value, fill = batter_type)) +
+  geom_boxplot() +
+  facet_wrap(~metric, scales = "free_y") +
+  theme_minimal() +
+  scale_fill_manual(values = c("#e74c3c", "#2ecc71", "#3498db")) +
+  labs(title = "Distribution of Core Metrics by Batter Type",
+       x = "Batter Type",
+       y = "Value") +
+  theme(
+    plot.title = element_text(hjust = 0.5),
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  )
+
+
+print("Secondary Variables Summary:")
+print(secondary_analysis)
+
+print("ANOVA Results:")
+print(anova_summary)
+
+# Save results if needed
+write_csv(
+  clean_data |> select(batter, batter_type),
+  "batter_clusters.csv"
+)
+```
+
+## Analysis of Batting Performance
+
+```{r}
+df_processed_with_cluster <- df_processed %>%
+  left_join(batter_stats_with_type %>% select(batter, batter_type.y), by = "batter") %>%
+  filter(!is.na(batter_type.y))
+
+# Distribution of batting outcomes across hitter categories
+df_processed_with_cluster <- df_processed_with_cluster %>%
+  mutate(events_grouped = case_when(
+    events %in% c("single", "double", "triple", "home_run") ~ "Hit",
+    events %in% c("field_out", "strikeout", "force_out", "grounded_into_double_play", 
+                  "strikeout_double_play", "sac_fly", "sac_bunt", "sac_fly_double_play", 
+                  "triple_play") ~ "Out",
+    events %in% c("field_error") ~ "Error",
+    events %in% c("walk", "hit_by_pitch", "catcher_interf") ~ "Walk",
+    events %in% c("fielders_choice", "fielders_choice_out") ~ "Fielders Choice",
+    TRUE ~ "Miscellaneous"
+  ))
+
+event_batter_type_totals <- df_processed_with_cluster %>%
+  filter(events_grouped != "Miscellaneous") %>%
+  group_by(batter_type.y) %>%
+  summarise(total_count = n(), .groups = "drop")
+
+event_distribution <- df_processed_with_cluster %>%
+  group_by(batter_type.y, events_grouped) %>%
+  summarise(count = n(), .groups = "keep") %>%
+  filter(events_grouped != "Miscellaneous") %>%
+  left_join(event_batter_type_totals, by = "batter_type.y") %>%
+  mutate(percentage = count / total_count)
+
+ggplot(event_distribution, aes(x = events_grouped, y = percentage, fill = batter_type.y)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  labs(title = "Distribution of Batting Outcomes Across Hitter Categories",
+       x = "Batting Outcome", y = "Percentage") +
+  theme_minimal()
+
+chi_square_data_event <- df_processed_with_cluster %>%
+  filter(!is.na(events_grouped)) %>%
+  group_by(batter_type.y, events_grouped) %>%
+  summarise(count = n(), .groups = "drop") %>%
+  pivot_wider(names_from = batter_type.y, values_from = count, values_fill = 0) %>%
+  column_to_rownames(var = "events_grouped")
+
+chi_test_event <- chisq.test(chi_square_data_event)
+
+print(chi_test_event)
+
+chi_test_event$residuals
+
+
+# Hit distribution
+hit_distribution <- df_processed_with_cluster %>%
+  mutate(events_detailed = case_when(
+    events_grouped == "Hit" & events == "single" ~ "Single",
+    events_grouped == "Hit" & events == "double" ~ "Double",
+    events_grouped == "Hit" & events == "triple" ~ "Triple",
+    events_grouped == "Hit" & events == "home_run" ~ "Home Run",
+    TRUE ~ NA_character_
+  )) %>%
+  filter(!is.na(events_detailed)) %>%
+  group_by(batter_type.y, events_detailed) %>%
+  summarise(count = n(), .groups = "drop") %>%
+  group_by(batter_type.y) %>%
+  mutate(total_count = sum(count), percentage = count / total_count)
+
+ggplot(hit_distribution, aes(x = events_detailed, y = percentage, fill = batter_type.y)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  labs(title = "Distribution of Hit Outcomes Across Hitter Categories",
+       x = "Hit Outcome", y = "Percentage",
+       fill = "Hitter Type") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+chi_square_data_hit <- hit_distribution %>%
+  select(batter_type.y, events_detailed, count) %>%
+  pivot_wider(names_from = batter_type.y, values_from = count, values_fill = 0) %>%
+  column_to_rownames(var = "events_detailed")
+
+chi_test_hit <- chisq.test(chi_square_data_hit)
+print(chi_test_hit)
+chi_test_hit$residuals
+
+
+# Proportion of batted ball types for each hitter category
+bb_batter_type_totals <- df_processed_with_cluster %>%
+  filter(bb_type != "", !is.na(bb_type)) %>%
+  group_by(batter_type.y) %>%
+  summarise(total_count = n(), .groups = "drop")
+
+bb_distribution <- df_processed_with_cluster %>%
+  filter(bb_type != "", !is.na(bb_type)) %>%
+  group_by(batter_type.y, bb_type) %>%
+  summarise(count = n(), .groups = "drop") %>%
+  left_join(bb_batter_type_totals, by = "batter_type.y") %>%
+  mutate(percentage = count / total_count)
+
+ggplot(bb_distribution, aes(x = bb_type, y = percentage, fill = batter_type.y)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  labs(title = "Distribution of Batted Ball Types Across Hitter Categories",
+       x = "Batted Ball Type", y = "Percentage") +
+  theme_minimal()
+
+bb_chi_data <- bb_distribution %>%
+  select(batter_type.y, bb_type, count) %>%
+  pivot_wider(names_from = batter_type.y, values_from = count, values_fill = 0) %>%
+  column_to_rownames(var = "bb_type")
+
+chi_test_bb <- chisq.test(bb_chi_data)
+
+print(chi_test_bb)
+
+print(chi_test_bb$residuals)
+```
+
+## Pitch Interaction Analysis
+
+```{r}
+# Batting performance by pitch type for each hitter category
+pitch_performance <- df_processed_with_cluster %>%
+  filter(pitch_type != "", !is.na(pitch_type)) %>%  
+  group_by(batter_type.y, pitch_type) %>%
+  summarise(avg_launch_speed = mean(launch_speed, na.rm = TRUE),
+            avg_launch_angle = mean(launch_angle, na.rm = TRUE),
+            success_rate = mean(events == "single" | events == "double" | events == "home_run"), .groups = "keep")
+
+ggplot(pitch_performance, aes(x = pitch_type, y = success_rate, fill = batter_type.y)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  labs(title = "Batting Success Rate by Pitch Type Across Hitter Categories",
+       x = "Pitch Type", y = "Success Rate") +
+  theme_minimal()
+```
+
+### Heatmap
+
+```{r}
+# blank baseball zone 
+grid_data <- expand.grid(x = 1:8, y = 1:8)
+grid_data <- grid_data %>%
+  mutate(zone = case_when(
+    (x %in% c(2, 3) & y %in% c(2, 3)) ~ "Zone 1",
+    (x %in% c(4, 5) & y %in% c(2, 3)) ~ "Zone 2",
+    (x %in% c(6, 7) & y %in% c(2, 3)) ~ "Zone 3",
+    (x %in% c(2, 3) & y %in% c(4, 5)) ~ "Zone 4",
+    (x %in% c(4, 5) & y %in% c(4, 5)) ~ "Zone 5",
+    (x %in% c(6, 7) & y %in% c(4, 5)) ~ "Zone 6",
+    (x %in% c(2, 3) & y %in% c(6, 7)) ~ "Zone 7",
+    (x %in% c(4, 5) & y %in% c(6, 7)) ~ "Zone 8",
+    (x %in% c(6, 7) & y %in% c(6, 7)) ~ "Zone 9",
+    (x == 1 & y %in% 1:4) | (y == 1 & x %in% 1:4) ~ "Zone 11",
+    (x == 8 & y %in% 1:4) | (y == 1 & x %in% 5:8) ~ "Zone 12",
+    (x == 1 & y %in% 5:8) | (y == 8 & x %in% 1:4) ~ "Zone 13",
+    (x == 8 & y %in% 5:8) | (y == 8 & x %in% 5:8) ~ "Zone 14",
+    TRUE ~ NA_character_
+  ))
+
+zone_colors <- data.frame(
+  zone = c("Zone 1", "Zone 2", "Zone 3", "Zone 4", "Zone 5", "Zone 6",
+           "Zone 7", "Zone 8", "Zone 9", "Zone 11", "Zone 12", "Zone 13", "Zone 14"),
+  color = c("lightblue", "lightgreen", "orange", "pink", "purple", "cyan",
+            "yellow", "red", "blue", "grey", "brown", "lightyellow", "lightcoral")
+)
+
+grid_data_with_colors <- grid_data %>%
+  left_join(zone_colors, by = "zone")
+
+# heatmap data
+heatmap_power <- df_processed_with_cluster %>%
+  filter(batter_type.y == "Power") %>%
+  group_by(zone) %>%
+  summarise(avg_launch_speed = mean(launch_speed, na.rm = TRUE)) %>%
+  filter(!is.na(zone))%>%
+  mutate(zone = paste0("Zone ", zone))
+
+heatmap_control <- df_processed_with_cluster %>%
+  filter(batter_type.y == "Control") %>%
+  group_by(zone) %>%
+  summarise(avg_launch_speed = mean(launch_speed, na.rm = TRUE)) %>%
+  filter(!is.na(zone))%>%
+  mutate(zone = paste0("Zone ", zone))
+
+heatmap_patient <- df_processed_with_cluster %>%
+  filter(batter_type.y == "Patient") %>%
+  group_by(zone) %>%
+  summarise(avg_launch_speed = mean(launch_speed, na.rm = TRUE)) %>%
+  filter(!is.na(zone))%>%
+  mutate(zone = paste0("Zone ", zone))
+
+grid_data_with_colors <- grid_data_with_colors %>%
+  left_join(heatmap_power, by = "zone") %>%
+  rename(avg_launch_speed_power = avg_launch_speed) %>%
+  left_join(heatmap_control, by = "zone") %>%
+  rename(avg_launch_speed_control = avg_launch_speed) %>%
+  left_join(heatmap_patient, by = "zone") %>%
+  rename(avg_launch_speed_patient = avg_launch_speed)
+
+zone_labels <- grid_data_with_colors %>%
+  group_by(zone) %>%
+  summarise(
+    x = if_else(zone == "Zone 11", 1, 
+                if_else(zone == "Zone 12", 8,
+                        if_else(zone == "Zone 13", 1,
+                                if_else(zone == "Zone 14", 8, mean(x, na.rm = TRUE))))),
+    y = if_else(zone == "Zone 11", 1,
+                if_else(zone == "Zone 12", 1,
+                        if_else(zone == "Zone 13", 8,
+                                if_else(zone == "Zone 14", 8, mean(y, na.rm = TRUE))))),
+    avg_launch_speed_power = first(avg_launch_speed_power),
+    avg_launch_speed_control = first(avg_launch_speed_control),
+    avg_launch_speed_patient = first(avg_launch_speed_patient)
+  ) %>%
+  filter(!is.na(zone))
+
+ggplot(grid_data_with_colors, aes(x = x, y = y, fill = zone)) +
+  geom_tile() +
+  scale_fill_manual(values = setNames(zone_colors$color, zone_colors$zone), na.value = "white") +
+  geom_text(data = zone_labels, aes(x = x, y = y, label = zone), size = 5, color = "black") +
+  scale_y_reverse() +
+  labs(
+    title = "Empty Zone Map with Zone Labels"
+  ) +
+  theme_minimal() +
+  theme(
+    panel.grid = element_blank(),
+    panel.border = element_blank(),
+    axis.text = element_text(size = 10),
+    axis.title = element_text(size = 12),
+    plot.title = element_text(size = 14, hjust = 0.5)
+  )
+
+# power
+
+ggplot(grid_data_with_colors, aes(x = x, y = y, fill = avg_launch_speed_power)) +
+  geom_tile() +
+  scale_fill_gradient(low = "blue", high = "red", na.value = "white", name = "Avg Launch Speed") +
+
+  geom_text(data = zone_labels, aes(x = x, y = y, label = round(avg_launch_speed_power, 1)), 
+            size = 4, color = "black") +
+  scale_y_reverse() +
+  labs(
+    title = "Heatmap of Avg Launch Speed by Zone of Power Type"
+  ) +
+  theme_minimal() +
+  theme(
+    panel.grid = element_blank(),
+    panel.border = element_blank(),
+    axis.text = element_text(size = 10),
+    axis.title = element_text(size = 12),
+    plot.title = element_text(size = 14, hjust = 0.5),
+    legend.position = "right"
+  )
+
+
+ggplot(grid_data_with_colors, aes(x = x, y = y, fill = avg_launch_speed_control)) +
+  geom_tile() +
+  scale_fill_gradient(low = "blue", high = "red", na.value = "white", name = "Avg Launch Speed") +
+
+  geom_text(data = zone_labels, aes(x = x, y = y, label = round(avg_launch_speed_control, 1)), 
+            size = 4, color = "black") +
+  scale_y_reverse() +
+  labs(
+    title = "Heatmap of Avg Launch Speed by Zone of Control Type"
+  ) +
+  theme_minimal() +
+  theme(
+    panel.grid = element_blank(),
+    panel.border = element_blank(),
+    axis.text = element_text(size = 10),
+    axis.title = element_text(size = 12),
+    plot.title = element_text(size = 14, hjust = 0.5),
+    legend.position = "right"
+  )
+
+ggplot(grid_data_with_colors, aes(x = x, y = y, fill = avg_launch_speed_patient)) +
+  geom_tile() +
+  scale_fill_gradient(low = "blue", high = "red", na.value = "white", name = "Avg Launch Speed") +
+
+  geom_text(data = zone_labels, aes(x = x, y = y, label = round(avg_launch_speed_patient, 1)), 
+            size = 4, color = "black") +
+  scale_y_reverse() +
+  labs(
+    title = "Heatmap of Avg Launch Speed by Zone of Patient Type"
+  ) +
+  theme_minimal() +
+  theme(
+    panel.grid = element_blank(),
+    panel.border = element_blank(),
+    axis.text = element_text(size = 10),
+    axis.title = element_text(size = 12),
+    plot.title = element_text(size = 14, hjust = 0.5),
+    legend.position = "right"
+  )
+```
